@@ -19,7 +19,7 @@ from metpy.units import units
 import cartopy.crs as ccrs
 import gc
 from astropy.convolution import convolve
-from boto.s3.connection import S3Connection
+#from boto.s3.connection import S3Connection #boto was apparently discontinued, boto3 instead
 import tempfile
 import copy
 import math
@@ -82,6 +82,39 @@ def nearest_tobac_time(netcdf_list, tobac_lats, tobac_lons, tobac_times_datetime
     series_tobac_lons = pd.Series(tobac_lons_closest)
 
     return ka_time_series, series_tobac_times, series_tobac_indeces, series_tobac_lats, series_tobac_lons
+
+def nearest_tobac_loc(vad_df, weighted_tobac_lats, weighted_tobac_lons):
+    '''
+    To run this function, you must make sure you've pre-defined the generic find_nearest function first.
+    netcdf_file = a single netcdf file
+    morton_tobac_times_datetime = the list made from the get_storm_tobac function
+    '''
+    time_list = []
+    for netcdf_file in netcdf_list:
+        time_yoink = netcdf_file[-15:-3]
+        time_yoink_dt = datetime.strptime(time_yoink, '%y%m%d%H%M%S')
+        time_list.append(time_yoink_dt)
+        
+    time_yoink_dt_array = np.array(time_list)
+    time_yoink_dt_convert = time_yoink_dt_array.astype('datetime64[s]')
+    ka_time_series = pd.Series(time_yoink_dt_convert)
+    
+    nearest_tobac_index = []
+    for time in time_yoink_dt_convert:
+        nearest_tobac_index.append(tobac_index)
+        
+    nearest_tobac_index = []
+    for lat in vad_df['Latmean']:
+        tobac_index = find_nearest(weighted_tobac_lats, lat)
+        nearest_tobac_index.append(tobac_index)
+        
+    tobac_lats_closest = weighted_tobac_lats[nearest_tobac_index]
+    tobac_lons_closest = weighted_tobac_lons[nearest_tobac_index]
+    series_tobac_lats = pd.Series(tobac_lats_closest)
+    series_tobac_lons = pd.Series(tobac_lons_closest)
+    series_tobac_indeces = pd.Series(nearest_tobac_index)
+
+    return series_tobac_indeces, series_tobac_lats, series_tobac_lons
 
 def vehicle_correction_vad(radar,df):
     '''
@@ -349,22 +382,154 @@ def storm_speed_and_bearing(tobac_id_df, weights_list):
             else:
                 #print('nope')
                 break
-                
+
     for i in range(len(latitude_weighted_tobac)-1):
-        fwd_az, back_az, distance = geodesic.inv(longitude_weighted_tobac[i], latitude_weighted_tobac[i], longitude_weighted_tobac[i+1], latitude_weighted_tobac[i+1])
-        # distance in m, az in degrees clockwise from N
-        storm_bearing_tobac.append(fwd_az)
-        
-        for t in range(len(time)-1):
-            vel = distance / (time[i+1] - time[i]) # in m/s
-            storm_vel_knots = vel * 1.94384 # m/s to knots
-            storm_velocity_tobac.append(storm_vel_knots)
+        fwd_az, back_az, distance = geodesic.inv(
+            longitude_weighted_tobac[i],
+            latitude_weighted_tobac[i],
+            longitude_weighted_tobac[i+1],
+            latitude_weighted_tobac[i+1]
+        )
     
-        storm_bearing_array = np.array(storm_bearing_tobac).astype('int')
-        storm_velocity_array = np.array(storm_velocity_tobac).astype('int')
-        storm_bearing_times_array = np.array(storm_bearing_times).astype('datetime64[s]')
+        storm_bearing_tobac.append(fwd_az)
+    
+        vel = distance / (time[i+1] - time[i])
+        storm_vel_knots = vel * 1.94384
+        storm_velocity_tobac.append(storm_vel_knots)
+
+    storm_bearing_array = np.array(storm_bearing_tobac).astype(int)
+    storm_velocity_array = np.array(storm_velocity_tobac).astype(int)
+    storm_bearing_times_array = np.array(storm_bearing_times).astype('datetime64[s]')
+                
+    # for i in range(len(latitude_weighted_tobac)-1):
+    #     fwd_az, back_az, distance = geodesic.inv(longitude_weighted_tobac[i], latitude_weighted_tobac[i], longitude_weighted_tobac[i+1], latitude_weighted_tobac[i+1])
+    #     # distance in m, az in degrees clockwise from N
+    #     storm_bearing_tobac.append(fwd_az)
+        
+    #     for t in range(len(time)-1):
+    #         vel = distance / (time[i+1] - time[i]) # in m/s
+    #         storm_vel_knots = vel * 1.94384 # m/s to knots
+    #         storm_velocity_tobac.append(storm_vel_knots)
+    
+    #     storm_bearing_array = np.array(storm_bearing_tobac).astype('int')
+    #     storm_velocity_array = np.array(storm_velocity_tobac).astype('int')
+    #     storm_bearing_times_array = np.array(storm_bearing_times).astype('datetime64[s]')
 
     return latitude_weighted_tobac, longitude_weighted_tobac, storm_bearing_array, storm_velocity_array, storm_bearing_times_array
+
+def storm_speed_and_bearing_mult(tobac_id_df, weights_list, window):
+    storm_velocity_tobac = []
+    storm_bearing_tobac = []
+    storm_bearing_times = []
+    latitude_weighted_tobac = []
+    longitude_weighted_tobac = []
+    storm_vel_weighted_tobac = []
+    dist_tobac = []
+    storm_index = []
+    lat = tobac_id_df.latitude
+    lon = tobac_id_df.longitude
+    time = tobac_id_df.datetime.values.astype(float)
+    id = list(dict.fromkeys(tobac_id_df.storm_index))
+    
+    weights = weights_list
+    
+    weighted_tobac_df = pd.DataFrame()
+    
+    for i in id:
+    #for w in range(tobac_id_df[tobac_id_df['storm_index'] == i]['latitude'].index):
+        #if (w - 1 <= 0):
+            #print(w)
+            #continue
+        #else:
+            #if (w < (np.size(lat) -2)):
+                #print(f'{w} yuh')
+        lat_over_25_minutes = tobac_id_df[tobac_id_df['storm_index'] == i]['latitude'].rolling(window=5).apply(lambda x: 
+                                                                                                               np.dot(x, weights)/np.array(weights).sum(), raw=True)
+        lon_over_25_minutes = tobac_id_df[tobac_id_df['storm_index'] == i]['longitude'].rolling(window=5).apply(lambda x: 
+                                                                                                               np.dot(x, weights)/np.array(weights).sum(), raw=True)
+
+
+        storm_times = tobac_id_df[tobac_id_df['storm_index'] == i]['datetime']
+        #print(storm_times)
+        #storm_bearing_times.append(storm_times)
+        
+        #arraylat = np.array(lat_over_25_minutes)
+        #flatlat = arraylat.flatten()
+        #lat_weighted = np.average(flatlat, weights = weights)
+        #latitude_weighted_tobac.append(np.array(lat_over_25_minutes))
+        # arraylon = np.array(lon_over_25_minutes)
+        # flatlon = arraylon.flatten()
+        #lon_weighted = np.average(flatlon, weights = weights)
+        #longitude_weighted_tobac.append(np.array(lon_over_25_minutes))
+        index = [i] * len(lat_over_25_minutes)
+        #storm_index.extend(index) 
+        new_data = pd.DataFrame({
+                                    "weighted_lats": lat_over_25_minutes,
+                                    "weighted_lons": lon_over_25_minutes,
+                                    "storm_times": storm_times,
+                                    "storm_index": index
+                                })
+        weighted_tobac_df = pd.concat([weighted_tobac_df, new_data])
+
+    latitude_weighted_tobac = weighted_tobac_df['weighted_lats']
+    longitude_weighted_tobac = weighted_tobac_df['weighted_lons']
+    storm_bearing_times = weighted_tobac_df['storm_times']
+
+    #names=['weighted_lats', 'weighted_lons', 'storm_times', 'storm_index']
+
+    #print(weighted_tobac_df)
+    # weighted_tobac_df = pd.DataFrame()
+    # weighted_tobac_df['weighted_lat'] = latitude_weighted_tobac
+    # weighted_tobac_df['weighted_lon'] = longitude_weighted_tobac
+    # weighted_tobac_df['storm_index'] = storm_index
+        
+        
+           #else:
+                #print('nope')
+                #break
+
+    # Extract unique indices
+    #unique_indices = id
+    #unique_indices = sorted(set(storm_index))
+    # Dictionary to store latitudes for each index
+    #latitude_groups = {index: [] for index in id}
+    #longitude_groups = {index: [] for index in id}
+   # print(latitude_groups)
+    # Fill dictionary with latitudes corresponding to repeated indices
+   # for idx, repeated_idx in enumerate(storm_index):
+        #latitude_groups[repeated_idx].append(latitude_weighted_tobac[repeated_idx])
+        #longitude_groups[repeated_idx].append(longitude_weighted_tobac[repeated_idx])
+
+
+    # Compute the mean latitude for each index
+    #average_latitudes = {index: np.mean(latitudes) for index, latitudes in latitude_groups.items()}
+                
+    for i in id:
+        lats = weighted_tobac_df[weighted_tobac_df['storm_index'] == i]['weighted_lats']
+        lons = weighted_tobac_df[weighted_tobac_df['storm_index'] == i]['weighted_lons']
+
+        # for j in lats.index:
+        #     fwd_az, back_az, distance = geodesic.inv(lons[j], lats[j], lons[j+1], lats[j+1])
+        #     # distance in m, az in degrees clockwise from N
+        #     storm_bearing_tobac.append(fwd_az)
+
+        for j in range(len(lats.index) - 1):
+        # Use the next index by referencing j and j+1
+            fwd_az, back_az, distance = geodesic.inv(lons[lats.index[j]], lats[lats.index[j]], 
+                                                     lons[lats.index[j+1]], lats[lats.index[j+1]])
+            storm_bearing_tobac.append(fwd_az)
+
+    
+            for t in range(len(time)-1):
+                vel = distance / (time[t+1] - time[t]) # in m/s
+                storm_vel_knots = vel * 1.94384 # m/s to knots
+                storm_velocity_tobac.append(storm_vel_knots)
+
+    storm_bearing_array = np.array(storm_bearing_tobac).astype('int')
+    storm_velocity_array = np.array(storm_velocity_tobac).astype('int')
+    storm_bearing_times_array = np.array(storm_bearing_times).astype('datetime64[s]')
+
+    return latitude_weighted_tobac, longitude_weighted_tobac, storm_bearing_array, storm_velocity_array, storm_bearing_times_array, weighted_tobac_df
 
 def azshear_grib_variables(grib_nc):
     lats = pd.Series([])
@@ -1288,3 +1453,200 @@ def find_nearest_vads(netcdf_list, tobac_times_datetime):
         closest_vads.append(closest_vads_1)
 
     return closest_vads
+
+def tor_id_new_time(ka_df, storm_event_data, event_type, tornado_location, timezone, daylight_savings):
+    '''
+    This function uses .csv from NOAA's Storm Events Database to compare 
+    the times VADs were taken with when the tornado was reported.
+
+    ka_df = dataframe you want the tor ids to be added to
+    date = date the data from the storm event database was recorded (MMDDYYYY)
+    event_type = is typically 'Tornado' but for posterity left it as a variable
+    storm_event_data = csv from the storm event database
+    tornado_location = str of the desired location name IN ALL CAPS
+    timezone = str of timezone in format US/timezone (Central, Mountain, etc)
+    daylight_savings = False, the database reports in standard time, even during daylight savings
+    '''
+    tor_begin_time = []
+    tor_end_time = []
+    tor_begin_date = []
+    tor_end_date = []
+    vads_tor_time = []
+    vads_tor_nontor = []
+    tor_id = storm_event_data.EVENT_TYPE == event_type
+    tor_loc = storm_event_data.BEGIN_LOCATION.isin(tornado_location)
+    
+    for i in range(len(tor_id)):
+        if tor_id[i] == True and tor_loc[i] == True:
+            print(storm_event_data.BEGIN_TIME[i], storm_event_data.BEGIN_LOCATION[i])
+            tor_begin_time.append(storm_event_data.BEGIN_TIME[i])
+            tor_end_time.append(storm_event_data.END_TIME[i])
+            tor_begin_date.append(storm_event_data.BEGIN_DATE[i])
+            tor_end_date.append(storm_event_data.END_DATE[i])
+        else:
+            continue
+            
+    tor_begin_time_array = np.array(tor_begin_time)
+    tor_end_time_array = np.array(tor_end_time)
+
+    tor_start_dt_list = []
+    tor_end_dt_list = []
+    
+    for i in range(len(tor_begin_time_array)):
+        tor_start = tor_begin_date[i] + str(f' {tor_begin_time_array[i]}')
+        tor_start_dt = datetime.strptime(tor_start, '%m/%d/%Y %H%M')
+        print(tor_start_dt)
+        local_time_start = pytz.timezone(timezone).localize(tor_start_dt, is_dst = daylight_savings)
+        
+        if local_time_start.dst() != timedelta(0):  # DST is in effect
+            # Manually adjust by adding one hour
+            corrected_time_start = local_time_start + timedelta(hours=1)
+        else:
+            # No DST adjustment needed
+            corrected_time_start = local_time_start
+
+        start_utc = corrected_time_start.astimezone(pytz.utc)
+        tor_start_dt_list.append(start_utc)
+        
+        tor_end = tor_end_date[i] + str(f' {tor_end_time_array[i]}')
+        tor_end_dt = datetime.strptime(tor_end, '%m/%d/%Y %H%M')
+        local_time_end = pytz.timezone(timezone).localize(tor_end_dt, is_dst = daylight_savings)
+
+        if local_time_end.dst() != timedelta(0):  # DST is in effect
+            # Manually adjust by adding one hour
+            corrected_time_end = local_time_end + timedelta(hours=1)
+        else:
+            # No DST adjustment needed
+            corrected_time_end = local_time_end
+
+        end_utc = corrected_time_end.astimezone(pytz.utc)
+        tor_end_dt_list.append(end_utc)
+
+    print(min(tor_start_dt_list))
+    
+    for dt_str in ka_df.Datetime:
+        dt_str = str(dt_str)
+        dt = datetime.strptime(dt_str + str(f'+00:00'), '%Y-%m-%d %H:%M:%S%z') # makes non naive datetime
+        if dt < min(tor_start_dt_list):
+            # if the vad time is <= the tor begin time AND is <= the tor begin day
+            vads_tor_time.append('pre tor')
+            
+        if (dt >= min(tor_start_dt_list)) & (dt < max(tor_end_dt_list)):
+                vads_tor_time.append('during tor')
+                
+        if dt >= max(tor_end_dt_list):
+                vads_tor_time.append('post tor')
+
+            
+        # if (tor_start_dt_list[0] - dt).seconds > 1800:
+        #     vads_tor_nontor.append('pre tor')
+            
+        # elif (tor_start_dt_list[0] - dt).seconds <= 1800:
+        #     vads_tor_nontor.append('tor')
+
+        if ((min(tor_start_dt_list)) - dt).seconds > 1800:
+            vads_tor_nontor.append('pre tor')
+            
+        elif ((min(tor_start_dt_list)) - dt).seconds <= 1800:
+            vads_tor_nontor.append('tor')
+
+        elif dt >= max(tor_end_dt_list):
+            vads_tor_nontor.append('post tor')
+            
+        else:
+            vads_tor_nontor.append('x')
+
+    #ka_df.insert(4, 'Tor', vads_tor_time)
+
+    return vads_tor_time, vads_tor_nontor
+
+def time_from_tor_fixed_tor_time(ka_df, storm_event_data, event_type, tornado_location, timezone, daylight_savings):
+    '''
+    This function uses .csv from NOAA's Storm Events Database to compare 
+    the times VADs were taken with when the tornado was reported.
+
+    ka_df = dataframe you want the tor ids to be added to
+    date = date the data from the storm event database was recorded (MMDDYYYY)
+    event_type = is typically 'Tornado' but for posterity left it as a variable
+    storm_event_data = csv from the storm event database
+    tornado_location = str of the desired location name IN ALL CAPS
+    timezone = str of timezone in format US/timezone (Central, Mountain, etc)
+    daylight_savings = False, the database reports in standard time, even during daylight savings
+    '''
+    tor_begin_time = []
+    tor_end_time = []
+    tor_begin_date = []
+    tor_end_date = []
+    vads_tor_time = []
+    vads_tor_nontor = []
+    tor_id = storm_event_data.EVENT_TYPE == event_type
+    tor_loc = storm_event_data.BEGIN_LOCATION.isin(tornado_location)
+    
+    for i in range(len(tor_id)):
+        if tor_id[i] == True and tor_loc[i] == True:
+            print(storm_event_data.BEGIN_TIME[i], storm_event_data.BEGIN_LOCATION[i])
+            tor_begin_time.append(storm_event_data.BEGIN_TIME[i])
+            tor_end_time.append(storm_event_data.END_TIME[i])
+            tor_begin_date.append(storm_event_data.BEGIN_DATE[i])
+            tor_end_date.append(storm_event_data.END_DATE[i])
+        else:
+            continue
+            
+    tor_begin_time_array = np.array(tor_begin_time)
+    tor_end_time_array = np.array(tor_end_time)
+
+    tor_start_dt_list = []
+    tor_end_dt_list = []
+    
+    for i in range(len(tor_begin_time_array)):
+        tor_start = tor_begin_date[i] + str(f' {tor_begin_time_array[i]}')
+        tor_start_dt = datetime.strptime(tor_start, '%m/%d/%Y %H%M')
+        print(tor_start_dt)
+        local_time_start = pytz.timezone(timezone).localize(tor_start_dt, is_dst = daylight_savings)
+        
+        if local_time_start.dst() != timedelta(0):  # DST is in effect
+            # Manually adjust by adding one hour
+            corrected_time_start = local_time_start + timedelta(hours=1)
+        else:
+            # No DST adjustment needed
+            corrected_time_start = local_time_start
+
+        start_utc = corrected_time_start.astimezone(pytz.utc)
+        tor_start_dt_list.append(start_utc)
+        
+        tor_end = tor_end_date[i] + str(f' {tor_end_time_array[i]}')
+        tor_end_dt = datetime.strptime(tor_end, '%m/%d/%Y %H%M')
+        local_time_end = pytz.timezone(timezone).localize(tor_end_dt, is_dst = daylight_savings)
+
+        if local_time_end.dst() != timedelta(0):  # DST is in effect
+            # Manually adjust by adding one hour
+            corrected_time_end = local_time_end + timedelta(hours=1)
+        else:
+            # No DST adjustment needed
+            corrected_time_end = local_time_end
+
+        end_utc = corrected_time_end.astimezone(pytz.utc)
+        tor_end_dt_list.append(end_utc)
+
+    print(f'start:{min(tor_start_dt_list)}')
+    print(f'end:{max(tor_end_dt_list)}')
+    
+    for dt_str in ka_df.Datetime:
+        dt_str = str(dt_str)
+        dt = datetime.strptime(dt_str + str(f'+00:00'), '%Y-%m-%d %H:%M:%S%z') # makes non naive datetime
+        #to_tor = (tor_start_dt_list[0] - dt).total_seconds() / 60 time after tor is negative
+        #to_tor = (dt - tor_start_dt_list[0]).total_seconds() / 60 # time after tor is positive
+        
+        # if (tor_start_dt_list[0] <= dt <= max(tor_end_dt_list)): # if time occurs while tornado is ongoing, time til tor =0
+        #     vads_tor_time.append(0)
+        # else:
+        #     to_tor = (dt - tor_start_dt_list[0]).total_seconds() / 60
+        #     vads_tor_time.append(to_tor)
+
+        if (min(tor_start_dt_list) <= dt <= max(tor_end_dt_list)): # if time occurs while tornado is ongoing, time til tor =0
+            vads_tor_time.append(0)
+        else:
+            to_tor = (dt - min(tor_start_dt_list)).total_seconds() / 60
+            vads_tor_time.append(to_tor)
+
+    return vads_tor_time
